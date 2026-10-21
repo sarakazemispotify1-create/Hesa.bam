@@ -255,9 +255,9 @@ const DEF_CATS={
   {id:'cin',name:'سایر درآمدها',icon:'💰',type:'inc',subs:[]}
  ]
 };
-const fresh=()=>({v:1,settings:{dark:'auto',space:'p',provider:'gemini',gKey:'',gModel:'gemini-flash-latest',apiKey:'',model:'claude-sonnet-5-5',remind:1,lastNotif:''},cats:JSON.parse(JSON.stringify(DEF_CATS)),tx:[],loans:[]});
+const fresh=()=>({v:1,settings:{dark:'auto',space:'p',provider:'gemini',gKey:'',gModel:'gemini-flash-latest',apiKey:'',model:'claude-sonnet-5-5',remind:1,lastNotif:''},cats:JSON.parse(JSON.stringify(DEF_CATS)),tx:[],loans:[],rules:{p:{},c:{}}});
 function load(){
-  try{const s=JSON.parse(localStorage.getItem(KEY));if(s&&s.cats&&Array.isArray(s.tx)){s.settings=Object.assign(fresh().settings,s.settings||{});s.loans=s.loans||[];return s}}catch(e){}
+  try{const s=JSON.parse(localStorage.getItem(KEY));if(s&&s.cats&&Array.isArray(s.tx)){s.settings=Object.assign(fresh().settings,s.settings||{});s.loans=s.loans||[];s.rules=Object.assign({p:{},c:{}},s.rules||{});return s}}catch(e){}
   return fresh();
 }
 let S=load();
@@ -388,6 +388,9 @@ function vSettings(){
    <label>مدل</label><input dir="ltr" data-set="model" value="${esc(s.model)}">
    <p class="hint">این گزینه هزینه دارد و باید در console.anthropic.com اعتبار شارژ کنی.</p>`}
    <p class="hint">کلید فقط روی همین گوشی ذخیره می‌شود و در فایل پشتیبان قرار نمی‌گیرد.</p></div>
+  <div class="card set"><h4>یادگیری پایانه‌ها</h4>
+   <p class="hint" style="margin:0 0 8px">${faD(Object.keys(S.rules[space()]).length)} پایانه (مثلاً کافه‌ای که هر روز می‌روی) یاد گرفته شده است. تراکنش‌هایی که با همان پایانه بیایند، خودکار دسته‌بندی می‌شوند.</p>
+   ${Object.keys(S.rules[space()]).length?'<button class="btn danger" style="width:100%" data-act="rules-clear">فراموش کردن همه</button>':''}</div>
   <div class="card set"><h4>یادآوری سررسید</h4>
    <label>چند روز مانده به سررسید یادآوری شود؟</label>
    <select data-set="remind">${[0,1,2,3,7].map(n=>`<option value="${n}" ${s.remind===n?'selected':''}>${n===0?'همان روز':faD(n)+' روز قبل'}</option>`).join('')}</select>
@@ -451,6 +454,7 @@ function fHtml(){
   const cs=cats().filter(c=>c.type===F.type),cur=catOf(F.cat);
   return `<h3>${F.id?'ویرایش تراکنش':'تراکنش جدید'}</h3>
   ${F.ai?`<div class="aib">🤖 اطلاعات از روی عکس خوانده شد. مبلغ و تاریخ را بررسی و دسته‌بندی را انتخاب کن.${draftQ.length?` (${faD(draftQ.length)} رسید دیگر در صف است)`:''}</div>`:''}
+  ${F.term?`<div class="aib">پایانه ${faD(F.term)}${F.auto?' · دسته‌بندی از تراکنش‌های قبلی همین پایانه تشخیص داده شد':' · بعد از ذخیره، دفعه بعد خودکار دسته‌بندی می‌شود'}</div>`:''}
   <div class="seg2"><button class="${F.type==='exp'?'on exp':''}" data-act="ftype" data-v="exp">هزینه</button><button class="${F.type==='inc'?'on inc':''}" data-act="ftype" data-v="inc">درآمد</button></div>
   <label>مبلغ (تومان)</label><input class="big" inputmode="numeric" data-bind="F.amount" data-num="1" value="${F.amount?F.amount.toLocaleString('en-US'):''}" placeholder="۰">
   <label>دسته‌بندی</label><div class="chips">${cs.map(c=>`<button class="chip ${F.cat===c.id?'on':''}" data-act="fcat" data-id="${c.id}">${c.icon} ${esc(c.name)}</button>`).join('')}</div>
@@ -458,7 +462,7 @@ function fHtml(){
   <label>تاریخ</label>${dateSel('F.date',F.date,3,1)}
   <label>توضیح</label><input data-bind="F.note" value="${esc(F.note)}" placeholder="اختیاری">
   ${!F.id?`<div style="margin-top:14px"><button class="scanbtn" data-act="scan">📷 خواندن رسید یا واریزی با هوش مصنوعی</button></div>`:''}
-  <div class="btns"><button class="btn pri" data-act="fsave">ذخیره</button>${F.id?'<button class="btn danger" data-act="fdel">حذف</button>':''}</div>`;
+  <div class="btns"><button class="btn pri" data-act="fsave">ذخیره</button>${F.ai?'<button class="btn" data-act="fskip">رد کردن</button>':''}${F.id?'<button class="btn danger" data-act="fdel">حذف</button>':''}</div>`;
 }
 
 /* فرم وام */
@@ -533,45 +537,107 @@ function toB64(file,max){
     im.onerror=()=>rej(new Error('تصویر خوانده نشد'));im.src=u;
   });
 }
-async function aiRead(file){
-  const key=keyOf().trim();
-  if(!key)throw new Error('کلید API در تنظیمات وارد نشده');
-  const b64=await toB64(file,1600);
-  const list=cats().map(c=>`${c.id} = ${c.name} (${c.type==='inc'?'income':'expense'})`).join('\n');
-  const prompt=`This image is an Iranian receipt, POS slip, invoice, or a bank-app screenshot of a transfer/payment (Persian text).
-Extract the transaction and answer with ONLY one JSON object, no other text:
-{"type":"expense"|"income","amount":<number, English digits, no separators>,"unit":"rial"|"toman","date":"YYYY/MM/DD Jalali date as shown, or null","title":"short Persian description: store name, or who was paid / who paid","category_id":"best matching id from the list, or null"}
-Rules: "income" only if money was received (واریز به حساب). Money the user paid or transferred out is "expense". Use "rial" unless the document clearly says تومان. Convert all Persian digits to English digits.
-Categories:
-${list}`;
-  let txt='';
-  if(S.settings.provider==='gemini'){
-    const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(S.settings.gModel||'gemini-flash-latest')+':generateContent',{method:'POST',
-      headers:{'content-type':'application/json','x-goog-api-key':key},
-      body:JSON.stringify({contents:[{parts:[{text:prompt},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],generationConfig:{responseMimeType:'application/json'}})});
-    if(!r.ok){let m='';try{m=(await r.json()).error.message}catch(e){}
-      throw new Error(r.status===429?'سهمیه رایگان تمام شد؛ کمی بعد دوباره امتحان کن':r.status===404?'نام مدل درست نیست':r.status===400||r.status===403?'کلید API نامعتبر است':(m||'خطای سرور '+r.status))}
-    const data=await r.json();
-    txt=((((data.candidates||[])[0]||{}).content||{}).parts||[]).map(p=>p.text||'').join('');
-  }else{
-    const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
-      headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:S.settings.model||'claude-sonnet-5-5',max_tokens:500,messages:[{role:'user',content:[{type:'image',source:{type:'base64',media_type:'image/jpeg',data:b64}},{type:'text',text:prompt}]}]})});
-    if(!r.ok){let m='';try{m=(await r.json()).error.message}catch(e){}throw new Error(r.status===401?'کلید API نامعتبر است':(m||'خطای سرور '+r.status))}
-    const data=await r.json();
-    txt=(data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
+const GB='https://generativelanguage.googleapis.com/v1beta/';
+function friendlyErr(status,msg){
+  msg=msg||'';
+  if(/location/i.test(msg))return 'گوگل این منطقه را پشتیبانی نمی‌کند؛ فیلترشکن را روشن کن و دوباره امتحان کن';
+  if(status===429)return 'سهمیه رایگان تمام شد؛ کمی بعد دوباره امتحان کن';
+  if(status===401||status===403||/api key/i.test(msg))return 'کلید API نامعتبر است ('+msg.slice(0,120)+')';
+  return (msg||'خطای سرور')+' ['+status+']';
+}
+async function pickGeminiModel(key){
+  const r=await fetch(GB+'models?pageSize=200&key='+encodeURIComponent(key));
+  if(!r.ok)return null;
+  const d=await r.json();
+  const c=(d.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes('generateContent')&&/flash/.test(m.name)&&!/lite|image|tts|live|audio|thinking|exp|8b|robotics|computer/.test(m.name))
+    .map(m=>({n:m.name.replace('models/',''),v:parseFloat((m.name.match(/(\d+(?:\.\d+)?)/)||[0,0])[1]),p:/preview/.test(m.name)?1:0}));
+  c.sort((x,y)=>y.v-x.v||x.p-y.p);
+  return c.length?c[0].n:null;
+}
+async function geminiCall(prompt,b64,key){
+  const call=model=>fetch(GB+'models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(key),{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({contents:[{parts:[{text:prompt},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],generationConfig:{responseMimeType:'application/json'}})});
+  let r;
+  try{r=await call(S.settings.gModel||'gemini-flash-latest')}catch(e){throw new Error('اتصال به گوگل برقرار نشد. اینترنت یا فیلترشکن را چک کن.')}
+  if(r.status===404||r.status===400){
+    let m='';try{m=(await r.clone().json()).error.message}catch(e){}
+    if(r.status===404||/model/i.test(m)){
+      const nm=await pickGeminiModel(key);
+      if(nm&&nm!==S.settings.gModel){S.settings.gModel=nm;save();r=await call(nm)}
+    }
   }
-  const m=txt.match(/\{[\s\S]*\}/);if(!m)throw new Error('پاسخ قابل فهم نبود');
-  const j=JSON.parse(m[0]);
+  if(!r.ok){let m='';try{m=(await r.json()).error.message}catch(e){}throw new Error(friendlyErr(r.status,m))}
+  const data=await r.json();
+  return ((((data.candidates||[])[0]||{}).content||{}).parts||[]).map(p=>p.text||'').join('');
+}
+async function claudeCall(prompt,b64,key){
+  let r;
+  try{r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+    headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model:S.settings.model||'claude-sonnet-5-5',max_tokens:2000,messages:[{role:'user',content:[{type:'image',source:{type:'base64',media_type:'image/jpeg',data:b64}},{type:'text',text:prompt}]}]})})}
+  catch(e){throw new Error('اتصال برقرار نشد')}
+  if(!r.ok){let m='';try{m=(await r.json()).error.message}catch(e){}throw new Error(r.status===401?'کلید API نامعتبر است':(m||'خطای سرور '+r.status))}
+  const data=await r.json();
+  return (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
+}
+function mkDraft(j){
   let amt=Number(toEn(String(j.amount||0)))||0;if(j.unit==='rial')amt=Math.round(amt/10);
   let date=todayISO();
   if(j.date){const dm=toEn(j.date).match(/(\d{3,4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/);
     if(dm){const y=+dm[1],mo=+dm[2],d=+dm[3];try{if(mo>=1&&mo<=12&&d>=1&&d<=31)date=y>1300&&y<1500?j2iso(y,mo,Math.min(d,jLen(y,mo))):(y>1900?isoOf(y,mo,d):date)}catch(e){}}}
   const ty=j.type==='income'?'inc':'exp';
   const ok=cats().some(c=>c.id===j.category_id&&c.type===ty);
-  return {type:ty,amount:amt,cat:ok?j.category_id:'',sub:'',date,note:String(j.title||'').slice(0,80),ai:true};
+  const term=toEn(String(j.terminal||'')).replace(/\D/g,'');
+  const tm=toEn(String(j.time||'')).match(/\d{1,2}:\d{2}(:\d{2})?/);
+  const d={type:ty,amount:amt,cat:ok?j.category_id:'',sub:'',date,note:String(j.title||'').slice(0,80),ai:true,term:term.length>=4?term:'',time:tm?tm[0]:''};
+  const rule=d.term&&S.rules[space()][d.term];
+  if(rule&&rule.type===ty&&cats().some(c=>c.id===rule.cat)){d.cat=rule.cat;d.sub=rule.sub||'';if(rule.note)d.note=rule.note;d.auto=true}
+  return d;
+}
+async function aiRead(file){
+  const key=keyOf().trim();
+  if(!key)throw new Error('کلید API در تنظیمات وارد نشده');
+  const b64=await toB64(file,2400);
+  const list=cats().map(c=>`${c.id} = ${c.name} (${c.type==='inc'?'income':'expense'})`).join('\n');
+  const prompt=`The image is Persian (Iranian): a bank-app statement screenshot (list of transactions), a POS slip, an invoice, or a single transfer receipt. It may contain ONE or SEVERAL transactions. Extract EVERY transaction visible.
+Answer with ONLY this JSON, no other text:
+{"transactions":[{"type":"expense"|"income","amount":<number, English digits, no separators>,"unit":"rial"|"toman","date":"YYYY/MM/DD Jalali date as shown, or null","title":"very short Persian description","terminal":"digits only, or null","time":"HH:MM:SS as shown, or null","category_id":"best id from the list, or null"}]}
+Rules:
+- In bank statements "برداشت" (withdrawal, red, minus sign) = expense; "واریز" / "سپرده" (deposit) = income.
+- The amount is the transaction amount, NOT the balance ("موجودی").
+- Use "rial" unless the document clearly says تومان.
+- title: short, like "خرید با کارت" or "پرداخت ملت" or the store name. Do NOT put card numbers, terminal numbers or reference numbers in the title.
+- terminal: the number that comes right after the words «از ترمینال» (terminal / پایانه) in the description. It is NOT the card number (کارت) and NOT the reference number (شماره بازیابی). Use null if there is none.
+- time: the time of the transaction as shown (e.g. 22:34:20), or null.
+- Convert all Persian/Arabic digits to English digits.
+Categories:
+${list}`;
+  const txt=S.settings.provider==='gemini'?await geminiCall(prompt,b64,key):await claudeCall(prompt,b64,key);
+  const m=txt.match(/[\[{][\s\S]*[\]}]/);if(!m)throw new Error('پاسخ قابل فهم نبود');
+  let j;try{j=JSON.parse(m[0])}catch(e){throw new Error('پاسخ قابل فهم نبود')}
+  const arr=(Array.isArray(j)?j:(j.transactions||[j])).filter(x=>x&&Number(toEn(String(x.amount||0))));
+  if(!arr.length)throw new Error('تراکنشی در عکس پیدا نشد');
+  return arr.map(mkDraft);
 }
 const keyOf=()=>(S.settings.provider==='gemini'?S.settings.gKey:S.settings.apiKey)||'';
+let autoList=[];
+function afterScan(){
+  let dup=0;
+  draftQ=draftQ.filter(d=>{
+    if(d.term&&d.time&&S.tx.some(t=>t.space===space()&&t.term===d.term&&t.time===d.time&&t.date===d.date&&t.amount===d.amount)){dup++;return false}
+    return true;
+  });
+  autoList=draftQ.filter(d=>d.auto);draftQ=draftQ.filter(d=>!d.auto);
+  if(autoList.length){openSheet(()=>autoHtml(dup));return}
+  if(draftQ.length)nextDraft();
+  else if(dup)toast('همه این تراکنش‌ها قبلاً ثبت شده بودند',3500);
+}
+function autoHtml(dup){
+  const rows=autoList.map(d=>{const c=catOf(d.cat);return `<div class="row"><div class="ic">${c?c.icon:'❔'}</div><div class="mid"><b>${esc(d.sub||(c?c.name:''))}</b><small>${esc(d.note)} · ${fmtD(d.date)}</small></div><div class="amt ${d.type}">${d.type==='inc'?'+':'−'}${fa(d.amount)}</div></div>`}).join('');
+  return `<h3>${faD(autoList.length)} تراکنش شناخته شد</h3><p class="muted" style="margin:0">پایانه این تراکنش‌ها قبلاً دسته‌بندی شده بود.${draftQ.length?` ${faD(draftQ.length)} تراکنش جدید هم هست که خودت دسته‌بندی می‌کنی.`:''}${dup?` ${faD(dup)} تراکنش تکراری نادیده گرفته شد.`:''}</p>
+  <div style="margin-top:8px">${rows}</div>
+  <div class="btns"><button class="btn pri" data-act="auto-save">ذخیره همه</button><button class="btn" data-act="auto-review">بازبینی یکی‌یکی</button></div>`;
+}
 function nextDraft(){const d=draftQ.shift();if(d)openTxForm(null,d);else closeSheet()}
 
 /* ============ رویدادها ============ */
@@ -594,10 +660,19 @@ document.addEventListener('click',e=>{
       if(!F.amount||F.amount<=0){toast('مبلغ را وارد کن');break}
       if(!F.cat){toast('یک دسته‌بندی انتخاب کن');break}
       if(F.id){const i=S.tx.findIndex(t=>t.id===F.id);S.tx[i]=Object.assign({},S.tx[i],{type:F.type,amount:F.amount,cat:F.cat,sub:F.sub||'',date:F.date,note:F.note||''})}
-      else S.tx.push({id:uid(),space:space(),ts:Date.now(),type:F.type,amount:F.amount,cat:F.cat,sub:F.sub||'',date:F.date,note:F.note||''});
+      else S.tx.push({id:uid(),space:space(),ts:Date.now(),type:F.type,amount:F.amount,cat:F.cat,sub:F.sub||'',date:F.date,note:F.note||'',term:F.term||'',time:F.time||''});
+      if(F.term)S.rules[space()][F.term]={type:F.type,cat:F.cat,sub:F.sub||'',note:F.note||''};
       const j=iso2j(F.date);view={y:j[0],m:j[1]};save();toast('ذخیره شد ✓');
       if(draftQ.length)nextDraft();else closeSheet();
       render();break}
+    case 'auto-save':{
+      autoList.forEach(d=>S.tx.push({id:uid(),space:space(),ts:Date.now(),type:d.type,amount:d.amount,cat:d.cat,sub:d.sub||'',date:d.date,note:d.note||'',term:d.term||'',time:d.time||''}));
+      const last=autoList[autoList.length-1];if(last){const j=iso2j(last.date);view={y:j[0],m:j[1]}}
+      toast(faD(autoList.length)+' تراکنش ذخیره شد ✓');autoList=[];save();
+      if(draftQ.length)nextDraft();else closeSheet();render();break}
+    case 'auto-review':draftQ=autoList.concat(draftQ);autoList=[];nextDraft();break;
+    case 'rules-clear':if(confirm('همه پایانه‌های یادگرفته‌شده فراموش شوند؟')){S.rules[space()]={};save();render();toast('پاک شد')}break;
+    case 'fskip':if(draftQ.length)nextDraft();else closeSheet();break;
     case 'fdel':if(confirm('این تراکنش حذف شود؟')){S.tx=S.tx.filter(t=>t.id!==F.id);save();closeSheet();render();toast('حذف شد')}break;
     case 'scan':
       if(!keyOf().trim()){toast('اول کلید API را در تنظیمات وارد کن',3200);closeSheet();tab='settings';render();break}
@@ -668,11 +743,11 @@ $('#scan').addEventListener('change',async e=>{
   setBusy(true,'در حال خواندن رسید…');let fail=0,err='';
   for(let i=0;i<fs.length;i++){
     $('#busytxt').textContent=`در حال خواندن رسید ${faD(i+1)} از ${faD(fs.length)}…`;
-    try{draftQ.push(await aiRead(fs[i]))}catch(x){fail++;err=x.message||'خطا'}
+    try{const arr=await aiRead(fs[i]);arr.forEach(d=>draftQ.push(d))}catch(x){fail++;err=x.message||'خطا'}
   }
   setBusy(false);
-  if(fail)toast('خطا: '+err+(fs.length>1?` (${faD(fail)} مورد ناموفق)`:''),5000);
-  if(draftQ.length)nextDraft();
+  if(fail)alert('خواندن رسید ناموفق بود:\n'+err);
+  afterScan(fs.length);
 });
 $('#imp').addEventListener('change',e=>{
   const f=e.target.files[0];e.target.value='';if(!f)return;
@@ -682,7 +757,7 @@ $('#imp').addEventListener('change',e=>{
       const d=JSON.parse(rd.result);
       if(!d.cats||!Array.isArray(d.tx))throw 0;
       if(!confirm('اطلاعات فعلی با این پشتیبان جایگزین شود؟'))return;
-      const k=S.settings.apiKey,gk=S.settings.gKey;S=Object.assign(fresh(),d);S.settings=Object.assign(fresh().settings,d.settings||{});S.settings.apiKey=k;S.settings.gKey=gk;
+      const k=S.settings.apiKey,gk=S.settings.gKey;S=Object.assign(fresh(),d);S.settings=Object.assign(fresh().settings,d.settings||{});S.settings.apiKey=k;S.settings.gKey=gk;S.rules=Object.assign({p:{},c:{}},S.rules||{});
       save();render();toast('بازیابی شد ✓');
     }catch(x){toast('فایل پشتیبان معتبر نیست')}
   };
