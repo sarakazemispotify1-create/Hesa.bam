@@ -541,7 +541,7 @@ const GB='https://generativelanguage.googleapis.com/v1beta/';
 function friendlyErr(status,msg){
   msg=msg||'';
   if(/location/i.test(msg))return 'گوگل این منطقه را پشتیبانی نمی‌کند؛ فیلترشکن را روشن کن و دوباره امتحان کن';
-  if(status===429)return 'سهمیه رایگان تمام شد؛ کمی بعد دوباره امتحان کن';
+  if(status===429)return 'سهمیه رایگان این کلید صفر یا تمام است. پیام گوگل: '+msg.slice(0,220);
   if(status===401||status===403||/api key/i.test(msg))return 'کلید API نامعتبر است ('+msg.slice(0,120)+')';
   return (msg||'خطای سرور')+' ['+status+']';
 }
@@ -554,6 +554,17 @@ async function pickGeminiModel(key){
   c.sort((x,y)=>y.v-x.v||x.p-y.p);
   return c.length?c[0].n:null;
 }
+async function listFlash(key){
+  try{
+    const r=await fetch(GB+'models?pageSize=200&key='+encodeURIComponent(key));
+    if(!r.ok)return [];
+    const d=await r.json();
+    const c=(d.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes('generateContent')&&/flash/.test(m.name)&&!/image|tts|live|audio|thinking|exp|8b|robotics|computer/.test(m.name))
+      .map(m=>({n:m.name.replace('models/',''),v:parseFloat((m.name.match(/(\d+(?:\.\d+)?)/)||[0,0])[1]),l:/lite/.test(m.name)?0:1,p:/preview/.test(m.name)?1:0}));
+    c.sort((x,y)=>x.l-y.l||x.p-y.p||y.v-x.v);
+    return c.map(x=>x.n);
+  }catch(e){return []}
+}
 async function geminiCall(prompt,b64,key){
   const call=model=>fetch(GB+'models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(key),{method:'POST',headers:{'content-type':'application/json'},
     body:JSON.stringify({contents:[{parts:[{text:prompt},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],generationConfig:{responseMimeType:'application/json'}})});
@@ -564,6 +575,13 @@ async function geminiCall(prompt,b64,key){
     if(r.status===404||/model/i.test(m)){
       const nm=await pickGeminiModel(key);
       if(nm&&nm!==S.settings.gModel){S.settings.gModel=nm;save();r=await call(nm)}
+    }
+  }
+  if(r.status===429){
+    const cur=S.settings.gModel||'gemini-flash-latest';
+    const list=(await listFlash(key)).filter(n=>n!==cur);
+    for(const nm of list.slice(0,6)){
+      try{const r2=await call(nm);if(r2.ok){r=r2;S.settings.gModel=nm;save();break}}catch(e){}
     }
   }
   if(!r.ok){let m='';try{m=(await r.json()).error.message}catch(e){}throw new Error(friendlyErr(r.status,m))}
