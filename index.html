@@ -132,6 +132,13 @@ html[data-space=club] .sheet{border-top:2px solid var(--pri)}
 .pair i{display:block;width:12px;border-radius:5px 5px 2px 2px;min-height:3px}
 .pair .e{background:var(--exp)}.pair .n{background:var(--inc)}
 .col.cur{color:var(--text);font-weight:700}
+.brow{padding:10px 0;border-bottom:1px solid var(--line)}
+.brow.off{opacity:.45}
+.btop{display:flex;align-items:center;gap:10px}
+.bsel{display:flex;gap:8px;margin-top:8px}
+.bsel select{flex:1.2;min-width:0;padding:10px 8px}
+.bsel input{flex:1;min-width:0;padding:10px}
+.bsel select.need{border-color:var(--exp)}
 .legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-top:8px}
 .legend b{display:inline-block;width:10px;height:10px;border-radius:3px;margin-inline-end:4px}
 .insight{font-size:14px;line-height:1.9}
@@ -533,7 +540,7 @@ function toB64(file,max){
     const u=URL.createObjectURL(file),im=new Image();
     im.onload=()=>{let w=im.width,h=im.height;const s=Math.min(1,max/Math.max(w,h));w=Math.round(w*s);h=Math.round(h*s);
       const c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(im,0,0,w,h);URL.revokeObjectURL(u);
-      res(c.toDataURL('image/jpeg',.85).split(',')[1])};
+      res(c.toDataURL('image/jpeg',.8).split(',')[1])};
     im.onerror=()=>rej(new Error('تصویر خوانده نشد'));im.src=u;
   });
 }
@@ -566,22 +573,28 @@ async function listFlash(key){
   }catch(e){return []}
 }
 async function geminiCall(prompt,b64,key){
-  const call=model=>fetch(GB+'models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(key),{method:'POST',headers:{'content-type':'application/json'},
-    body:JSON.stringify({contents:[{parts:[{text:prompt},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],generationConfig:{responseMimeType:'application/json'}})});
+  const parts=[{text:prompt},{inline_data:{mime_type:'image/jpeg',data:b64}}];
+  const raw=(model,think)=>fetch(GB+'models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(key),{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({contents:[{parts}],generationConfig:Object.assign({responseMimeType:'application/json',temperature:0,maxOutputTokens:8192},think?{thinkingConfig:{thinkingBudget:0}}:{})})});
+  const send=async model=>{
+    let r=await raw(model,true);
+    if(r.status===400){let m='';try{m=(await r.clone().json()).error.message}catch(e){}if(/think/i.test(m))r=await raw(model,false)}
+    return r;
+  };
   let r;
-  try{r=await call(S.settings.gModel||'gemini-flash-latest')}catch(e){throw new Error('اتصال به گوگل برقرار نشد. اینترنت یا فیلترشکن را چک کن.')}
+  try{r=await send(S.settings.gModel||'gemini-flash-latest')}catch(e){throw new Error('اتصال به گوگل برقرار نشد. اینترنت یا فیلترشکن را چک کن.')}
   if(r.status===404||r.status===400){
     let m='';try{m=(await r.clone().json()).error.message}catch(e){}
     if(r.status===404||/model/i.test(m)){
       const nm=await pickGeminiModel(key);
-      if(nm&&nm!==S.settings.gModel){S.settings.gModel=nm;save();r=await call(nm)}
+      if(nm&&nm!==S.settings.gModel){S.settings.gModel=nm;save();r=await send(nm)}
     }
   }
   if(r.status===429){
     const cur=S.settings.gModel||'gemini-flash-latest';
     const list=(await listFlash(key)).filter(n=>n!==cur);
-    for(const nm of list.slice(0,6)){
-      try{const r2=await call(nm);if(r2.ok){r=r2;S.settings.gModel=nm;save();break}}catch(e){}
+    for(const nm of list.slice(0,3)){
+      try{const r2=await send(nm);if(r2.ok){r=r2;S.settings.gModel=nm;save();break}}catch(e){}
     }
   }
   if(!r.ok){let m='';try{m=(await r.json()).error.message}catch(e){}throw new Error(friendlyErr(r.status,m))}
@@ -615,9 +628,9 @@ function mkDraft(j){
 async function aiRead(file){
   const key=keyOf().trim();
   if(!key)throw new Error('کلید API در تنظیمات وارد نشده');
-  const b64=await toB64(file,2400);
+  const b64=await toB64(file,1800);
   const list=cats().map(c=>`${c.id} = ${c.name} (${c.type==='inc'?'income':'expense'})`).join('\n');
-  const prompt=`The image is Persian (Iranian): a bank-app statement screenshot (list of transactions), a POS slip, an invoice, or a single transfer receipt. It may contain ONE or SEVERAL transactions. Extract EVERY transaction visible.
+  const prompt=`The image is Persian (Iranian): a bank-app statement screenshot (list of transactions), a POS slip, an invoice, or a single transfer receipt. It may contain ONE or SEVERAL transactions (usually several cards one below another). Return one JSON entry for EACH transaction card, from top to bottom, and do not stop after the first one.
 Answer with ONLY this JSON, no other text:
 {"transactions":[{"type":"expense"|"income","amount":<number, English digits, no separators>,"unit":"rial"|"toman","date":"YYYY/MM/DD Jalali date as shown, or null","title":"very short Persian description","terminal":"digits only, or null","time":"HH:MM:SS as shown, or null","category_id":"best id from the list, or null"}]}
 Rules:
@@ -632,29 +645,38 @@ Categories:
 ${list}`;
   const txt=S.settings.provider==='gemini'?await geminiCall(prompt,b64,key):await claudeCall(prompt,b64,key);
   const m=txt.match(/[\[{][\s\S]*[\]}]/);if(!m)throw new Error('پاسخ قابل فهم نبود');
-  let j;try{j=JSON.parse(m[0])}catch(e){throw new Error('پاسخ قابل فهم نبود')}
+  let j;
+  try{j=JSON.parse(m[0])}
+  catch(e){
+    const objs=(txt.match(/\{[^{}]*"amount"[^{}]*\}/g)||[]).map(s=>{try{return JSON.parse(s)}catch(x){return null}}).filter(Boolean);
+    if(!objs.length)throw new Error('پاسخ قابل فهم نبود');
+    j=objs;
+  }
   const arr=(Array.isArray(j)?j:(j.transactions||[j])).filter(x=>x&&Number(toEn(String(x.amount||0))));
   if(!arr.length)throw new Error('تراکنشی در عکس پیدا نشد');
   return arr.map(mkDraft);
 }
 const keyOf=()=>(S.settings.provider==='gemini'?S.settings.gKey:S.settings.apiKey)||'';
-let autoList=[];
+let autoList=[],B=[];
 function afterScan(){
   let dup=0;
   draftQ=draftQ.filter(d=>{
     if(d.term&&d.time&&S.tx.some(t=>t.space===space()&&t.term===d.term&&t.time===d.time&&t.date===d.date&&t.amount===d.amount)){dup++;return false}
     return true;
   });
-  autoList=draftQ.filter(d=>d.auto);draftQ=draftQ.filter(d=>!d.auto);
-  if(autoList.length){openSheet(()=>autoHtml(dup));return}
-  if(draftQ.length)nextDraft();
+  B=draftQ.map(d=>Object.assign({},d,{on:true}));draftQ=[];
+  if(B.length)openSheet(()=>batHtml(dup));
   else if(dup)toast('همه این تراکنش‌ها قبلاً ثبت شده بودند',3500);
 }
-function autoHtml(dup){
-  const rows=autoList.map(d=>{const c=catOf(d.cat);return `<div class="row"><div class="ic">${c?c.icon:'❔'}</div><div class="mid"><b>${esc(d.sub||(c?c.name:''))}</b><small>${esc(d.note)} · ${fmtD(d.date)}</small></div><div class="amt ${d.type}">${d.type==='inc'?'+':'−'}${fa(d.amount)}</div></div>`}).join('');
-  return `<h3>${faD(autoList.length)} تراکنش شناخته شد</h3><p class="muted" style="margin:0">پایانه این تراکنش‌ها قبلاً دسته‌بندی شده بود.${draftQ.length?` ${faD(draftQ.length)} تراکنش جدید هم هست که خودت دسته‌بندی می‌کنی.`:''}${dup?` ${faD(dup)} تراکنش تکراری نادیده گرفته شد.`:''}</p>
-  <div style="margin-top:8px">${rows}</div>
-  <div class="btns"><button class="btn pri" data-act="auto-save">ذخیره همه</button><button class="btn" data-act="auto-review">بازبینی یکی‌یکی</button></div>`;
+function batHtml(dup){
+  const n=B.filter(x=>x.on).length,auto=B.filter(x=>x.auto).length;
+  return `<h3>${faD(B.length)} تراکنش پیدا شد</h3>
+  <p class="muted" style="margin:0">برای هر تراکنش دسته را انتخاب کن${auto?` (${faD(auto)} مورد با ✓ از روی پایانه‌های قبلی خودکار دسته‌بندی شده)`:''}. تراکنشی که نمی‌خواهی را تیک بزن تا کنار برود.${dup?` ${faD(dup)} تراکنش تکراری نادیده گرفته شد.`:''}</p>
+  <div style="margin-top:6px">${B.map((x,i)=>{
+    const cs=cats().filter(c=>c.type===x.type);
+    return `<div class="brow ${x.on?'':'off'}"><div class="btop"><input type="checkbox" data-bi="${i}" data-bf="on" ${x.on?'checked':''} style="width:22px;height:22px;flex:none;padding:0"><div class="mid"><b>${x.type==='inc'?'واریز':'برداشت'} ${fa(x.amount)} تومان</b><small>${fmtD(x.date)}${x.time?' · '+faD(x.time):''}${x.auto?' · ✓ خودکار':''}${x.term?' · پایانه '+faD(x.term.slice(-4)):''}</small></div></div>
+    <div class="bsel"><select data-bi="${i}" data-bf="cat" class="${x.on&&!x.cat?'need':''}"><option value="">انتخاب دسته…</option>${cs.map(c=>`<option value="${c.id}" ${x.cat===c.id?'selected':''}>${c.icon} ${esc(c.name)}</option>`).join('')}</select><input data-bi="${i}" data-bf="note" value="${esc(x.note)}" placeholder="توضیح"></div></div>`}).join('')}</div>
+  <div class="btns"><button class="btn pri" data-act="bat-save">ذخیره ${faD(n)} تراکنش</button></div>`;
 }
 function nextDraft(){const d=draftQ.shift();if(d)openTxForm(null,d);else closeSheet()}
 
@@ -683,6 +705,17 @@ document.addEventListener('click',e=>{
       const j=iso2j(F.date);view={y:j[0],m:j[1]};save();toast('ذخیره شد ✓');
       if(draftQ.length)nextDraft();else closeSheet();
       render();break}
+    case 'bat-save':{
+      const sel=B.filter(x=>x.on);
+      if(!sel.length){B=[];closeSheet();break}
+      const miss=sel.filter(x=>!x.cat).length;
+      if(miss){toast('برای '+faD(miss)+' تراکنش دسته انتخاب کن یا تیکشان را بردار',3500);break}
+      sel.forEach((x,i)=>{
+        S.tx.push({id:uid(),space:space(),ts:Date.now()+i,type:x.type,amount:x.amount,cat:x.cat,sub:x.sub||'',date:x.date,note:x.note||'',term:x.term||'',time:x.time||''});
+        if(x.term)S.rules[space()][x.term]={type:x.type,cat:x.cat,sub:x.sub||'',note:x.note||''};
+      });
+      const j=iso2j(sel[0].date);view={y:j[0],m:j[1]};
+      save();B=[];closeSheet();render();toast(faD(sel.length)+' تراکنش ذخیره شد ✓');break}
     case 'auto-save':{
       autoList.forEach(d=>S.tx.push({id:uid(),space:space(),ts:Date.now(),type:d.type,amount:d.amount,cat:d.cat,sub:d.sub||'',date:d.date,note:d.note||'',term:d.term||'',time:d.time||''}));
       const last=autoList[autoList.length-1];if(last){const j=iso2j(last.date);view={y:j[0],m:j[1]}}
@@ -734,6 +767,7 @@ document.addEventListener('click',e=>{
   }
 });
 function onField(t){
+  if(t.dataset.bi!==undefined){const x=B[+t.dataset.bi],f=t.dataset.bf;if(x){x[f]=t.type==='checkbox'?t.checked:t.value;if(f==='cat'||f==='on')reSheet()}return true}
   if(t.id==='q'){q=t.value;$('#listbody').innerHTML=listBody();return true}
   if(t.dataset.set){S.settings[t.dataset.set]=t.dataset.set==='remind'?+t.value:t.value;save();return true}
   const b=t.dataset.bind;
